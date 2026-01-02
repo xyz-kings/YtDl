@@ -1,0 +1,28 @@
+{
+  "name": "xdown-yt",
+  "version": "2.0.0",
+  "description": "Advanced YouTube Downloader API with multiple sources",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "axios": "^1.6.0",
+    "cors": "^2.8.5",
+    "cheerio": "^1.0.0-rc.12",
+    "ytdl-core": "^4.11.5",
+    "youtube-dl-exec": "^2.0.0",
+    "fluent-ffmpeg": "^2.1.2",
+    "m3u8stream": "^0.8.6",
+    "miniget": "^4.2.2",
+    "mime-types": "^2.1.35"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["youtube", "downloader", "api", "vercel"],
+  "author": "DarkForge-X",
+  "license": "MIT"
+}
