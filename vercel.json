@@ -8,16 +8,6 @@
   ],
   "routes": [
     {
-      "src": "/",
-      "dest": "/index.js",
-      "methods": ["GET"]
-    },
-    {
-      "src": "/api/ytdl",
-      "dest": "/index.js",
-      "methods": ["GET"]
-    },
-    {
       "src": "/(.*)",
       "dest": "/index.js"
     }
@@ -36,11 +26,7 @@
         },
         {
           "key": "Access-Control-Allow-Headers",
-          "value": "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version"
-        },
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=3600"
+          "value": "Content-Type"
         }
       ]
     }
