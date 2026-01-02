@@ -6,11 +6,11 @@ const cheerio = require('cheerio');
 const mime = require('mime-types');
 const { exec } = require('child_process');
 const util = require('util');
-const execAsync = util.promisify(exec);
 
 const app = express();
+const execAsync = util.promisify(exec);
 
-// Konfigurasi
+// Configuration
 const PORT = process.env.PORT || 3000;
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
@@ -21,12 +21,7 @@ app.use(express.json());
 // Utility Functions
 class YouTubeDownloader {
     constructor() {
-        this.sources = [
-            'ytdl-core',
-            'youtube-dl',
-            'external-api-1',
-            'external-api-2'
-        ];
+        this.sources = ['ytdl-core', 'external-api-1', 'external-api-2'];
     }
 
     async extractVideoId(url) {
@@ -42,22 +37,13 @@ class YouTubeDownloader {
         throw new Error('Invalid YouTube URL or ID');
     }
 
-    async getVideoInfoFromYouTubeDL(videoId) {
-        try {
-            // Menggunakan yt-dlp melalui exec
-            const { stdout } = await execAsync(`yt-dlp -j https://www.youtube.com/watch?v=${videoId}`);
-            return JSON.parse(stdout);
-        } catch (error) {
-            console.error('YouTube-DL Error:', error.message);
-            return null;
-        }
-    }
-
     async getVideoInfoFromExternalAPI(videoId, apiType = 1) {
         const apis = [
             {
-                url: `https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8`,
-                method: 'POST',
+                url: 'https://www.youtube.com/youtubei/v1/player',
+                params: {
+                    key: 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8'
+                },
                 data: {
                     context: {
                         client: {
@@ -68,15 +54,13 @@ class YouTubeDownloader {
                         }
                     },
                     videoId: videoId
-                },
-                headers: {
-                    'User-Agent': USER_AGENT,
-                    'Content-Type': 'application/json'
                 }
             },
             {
-                url: `https://youtubei.googleapis.com/youtubei/v1/player?key=AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w`,
-                method: 'POST',
+                url: 'https://youtubei.googleapis.com/youtubei/v1/player',
+                params: {
+                    key: 'AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w'
+                },
                 data: {
                     context: {
                         client: {
@@ -92,18 +76,21 @@ class YouTubeDownloader {
 
         try {
             const apiConfig = apis[apiType - 1];
-            const response = await axios({
-                method: apiConfig.method,
-                url: apiConfig.url,
-                data: apiConfig.data,
-                headers: apiConfig.headers || {
-                    'User-Agent': USER_AGENT,
-                    'Content-Type': 'application/json'
+            const response = await axios.post(
+                apiConfig.url,
+                apiConfig.data,
+                {
+                    params: apiConfig.params,
+                    headers: {
+                        'User-Agent': USER_AGENT,
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    }
                 }
-            });
+            );
             return response.data;
         } catch (error) {
-            console.error(`External API ${apiType} Error:`, error.message);
+            console.log(`External API ${apiType} failed: ${error.message}`);
             return null;
         }
     }
@@ -122,121 +109,141 @@ class YouTubeDownloader {
                 { headers }
             );
 
-            if (initial.data && initial.data.token) {
-                const token = initial.data.token;
+            if (initial.data?.token) {
                 const videoResponse = await axios.get(
-                    `https://d.ymcdn.org/api/v1/video?url=https://www.youtube.com/watch?v=${videoId}&token=${token}`,
+                    `https://d.ymcdn.org/api/v1/video?url=https://www.youtube.com/watch?v=${videoId}&token=${initial.data.token}`,
                     { headers }
                 );
                 return videoResponse.data;
             }
         } catch (error) {
-            console.error('DYMCDN Error:', error.message);
+            console.log('DYMCDN failed:', error.message);
             return null;
         }
     }
 
     async getVideoInfo(videoId) {
-        let videoInfo = null;
-        
-        // Coba semua sources berurutan
-        for (const source of this.sources) {
+        // Try ytdl-core first
+        try {
+            return await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`);
+        } catch (error) {
+            console.log('ytdl-core failed, trying external APIs...');
+        }
+
+        // Try external APIs
+        for (let i = 1; i <= 2; i++) {
             try {
-                switch(source) {
-                    case 'ytdl-core':
-                        videoInfo = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`);
-                        break;
-                    case 'youtube-dl':
-                        videoInfo = await this.getVideoInfoFromYouTubeDL(videoId);
-                        break;
-                    case 'external-api-1':
-                        videoInfo = await this.getVideoInfoFromExternalAPI(videoId, 1);
-                        break;
-                    case 'external-api-2':
-                        videoInfo = await this.getVideoInfoFromExternalAPI(videoId, 2);
-                        break;
-                }
-                
-                if (videoInfo) break;
+                const info = await this.getVideoInfoFromExternalAPI(videoId, i);
+                if (info) return info;
             } catch (error) {
-                console.log(`Source ${source} failed:`, error.message);
                 continue;
             }
         }
 
-        if (!videoInfo) {
-            // Fallback ke DYMCDN
-            videoInfo = await this.getVideoInfoFromDYMCDN(videoId);
-        }
-
-        return videoInfo;
+        // Try DYMCDN as last resort
+        return await this.getVideoInfoFromDYMCDN(videoId);
     }
 
     formatBytes(bytes) {
-        if (bytes === 0) return '0 Bytes';
+        if (!bytes || bytes === 0) return 'Unknown';
         const k = 1024;
         const sizes = ['Bytes', 'KB', 'MB', 'GB'];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + sizes[i];
-    }
-
-    parseDuration(seconds) {
-        const hours = Math.floor(seconds / 3600);
-        const minutes = Math.floor((seconds % 3600) / 60);
-        const secs = Math.floor(seconds % 60);
-        
-        if (hours > 0) {
-            return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-        }
-        return `${minutes}:${secs.toString().padStart(2, '0')}`;
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
 
     async formatResponse(videoInfo, videoId) {
-        let formats = [];
-        let videoData = {};
+        // Default video data structure
+        let videoData = {
+            id: videoId,
+            title: 'Unknown Title',
+            description: '',
+            duration: 0,
+            uploadDate: new Date().toISOString().split('T')[0],
+            thumbnail: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+            author: {
+                name: 'Unknown',
+                channelId: '',
+                profileUrl: ''
+            }
+        };
 
-        if (videoInfo.videoDetails) {
-            // Format ytdl-core
+        let formats = [];
+
+        // Parse based on response type
+        if (videoInfo?.videoDetails) {
+            // ytdl-core response
+            const details = videoInfo.videoDetails;
             videoData = {
-                id: videoInfo.videoDetails.videoId,
-                title: videoInfo.videoDetails.title,
-                description: videoInfo.videoDetails.description || '',
-                duration: parseInt(videoInfo.videoDetails.lengthSeconds),
-                uploadDate: videoInfo.videoDetails.uploadDate || new Date().toISOString().split('T')[0],
-                thumbnail: videoInfo.videoDetails.thumbnails[0]?.url || `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+                id: details.videoId,
+                title: details.title,
+                description: details.description || '',
+                duration: parseInt(details.lengthSeconds) || 0,
+                uploadDate: details.uploadDate || videoData.uploadDate,
+                thumbnail: details.thumbnails?.[0]?.url || videoData.thumbnail,
                 author: {
-                    name: videoInfo.videoDetails.author.name,
-                    channelId: videoInfo.videoDetails.author.id,
-                    profileUrl: `https://www.youtube.com/@${videoInfo.videoDetails.author.name.replace(/\s+/g, '')}`
+                    name: details.author?.name || 'Unknown',
+                    channelId: details.author?.id || '',
+                    profileUrl: details.author?.channel_url || 
+                               `https://www.youtube.com/@${details.author?.name?.replace(/\s+/g, '') || 'Unknown'}`
                 }
             };
 
-            // Format video formats
-            formats = videoInfo.formats
-                .filter(format => format.qualityLabel || format.audioQuality)
-                .map(format => ({
-                    quality: format.qualityLabel || 'audio',
-                    format: format.container || 'mp4',
-                    fps: format.fps || null,
-                    bitrate: format.audioBitrate ? `${Math.round(format.audioBitrate / 1000)}kbps` : null,
-                    size: format.contentLength ? this.formatBytes(parseInt(format.contentLength)) : 'Unknown',
-                    downloadUrl: `https://xdown-yt.vercel.app/api/download/${videoId}?quality=${format.qualityLabel || 'audio'}&format=${format.container || 'mp4'}`
-                }))
-                .filter((value, index, self) => 
-                    index === self.findIndex((t) => (
-                        t.quality === value.quality && t.format === value.format
-                    ))
-                );
+            // Get available formats
+            if (videoInfo.formats) {
+                formats = videoInfo.formats
+                    .filter(f => f.qualityLabel || f.audioQuality)
+                    .map(f => ({
+                        quality: f.qualityLabel || 'audio',
+                        format: f.container || 'mp4',
+                        fps: f.fps || null,
+                        bitrate: f.audioBitrate ? `${Math.round(f.audioBitrate / 1000)}kbps` : null,
+                        size: f.contentLength ? this.formatBytes(parseInt(f.contentLength)) : 'Unknown',
+                        downloadUrl: `https://xdown-yt.vercel.app/api/download/${videoId}?itag=${f.itag}`
+                    }));
+            }
+        } else if (videoInfo?.streamingData?.formats) {
+            // YouTube API response
+            const details = videoInfo.videoDetails || {};
+            videoData = {
+                id: videoId,
+                title: details.title || 'Unknown Title',
+                description: details.shortDescription || '',
+                duration: Math.floor(details.lengthSeconds || 0),
+                uploadDate: details.publishDate?.split('T')[0] || videoData.uploadDate,
+                thumbnail: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+                author: {
+                    name: details.author || 'Unknown',
+                    channelId: details.channelId || '',
+                    profileUrl: `https://www.youtube.com/channel/${details.channelId || ''}`
+                }
+            };
 
-        } else if (videoInfo.formats) {
-            // Format external API
+            // Get formats from streamingData
+            const allFormats = [
+                ...(videoInfo.streamingData.formats || []),
+                ...(videoInfo.streamingData.adaptiveFormats || [])
+            ];
+
+            formats = allFormats
+                .filter(f => f.url || f.cipher)
+                .map(f => ({
+                    quality: f.qualityLabel || (f.height ? `${f.height}p` : 'audio'),
+                    format: f.mimeType?.split('/')[1]?.split(';')[0] || 'mp4',
+                    fps: f.fps || null,
+                    bitrate: f.bitrate ? `${Math.round(f.bitrate / 1000)}kbps` : null,
+                    size: f.contentLength ? this.formatBytes(parseInt(f.contentLength)) : 'Unknown',
+                    downloadUrl: `https://xdown-yt.vercel.app/api/download/${videoId}?itag=${f.itag}`
+                }));
+        } else if (videoInfo?.formats) {
+            // DYMCDN or similar response
             videoData = {
                 id: videoId,
                 title: videoInfo.title || 'Unknown Title',
                 description: videoInfo.description || '',
                 duration: videoInfo.duration || 0,
-                uploadDate: videoInfo.upload_date || new Date().toISOString().split('T')[0],
-                thumbnail: videoInfo.thumbnail || `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+                uploadDate: videoInfo.upload_date || videoData.uploadDate,
+                thumbnail: videoInfo.thumbnail || videoData.thumbnail,
                 author: {
                     name: videoInfo.channel || videoInfo.uploader || 'Unknown',
                     channelId: videoInfo.channel_id || '',
@@ -245,33 +252,19 @@ class YouTubeDownloader {
             };
 
             formats = videoInfo.formats
-                .filter(f => f.url || f.fragment_base_url)
+                .filter(f => f.url)
                 .map(f => ({
                     quality: f.format_note || (f.height ? `${f.height}p` : 'audio'),
                     format: f.ext || 'mp4',
                     fps: f.fps || null,
                     bitrate: f.abr ? `${f.abr}kbps` : null,
                     size: f.filesize ? this.formatBytes(f.filesize) : 'Unknown',
-                    downloadUrl: `https://xdown-yt.vercel.app/api/download/${videoId}?quality=${f.format_note || (f.height ? `${f.height}p` : 'audio')}&format=${f.ext || 'mp4'}`
+                    downloadUrl: f.url || `https://xdown-yt.vercel.app/api/download/${videoId}?format=${f.format_id}`
                 }));
+        }
 
-        } else {
-            // Fallback minimal format
-            videoData = {
-                id: videoId,
-                title: 'Video Information Unavailable',
-                description: '',
-                duration: 0,
-                uploadDate: new Date().toISOString().split('T')[0],
-                thumbnail: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
-                author: {
-                    name: 'Unknown',
-                    channelId: '',
-                    profileUrl: ''
-                }
-            };
-
-            // Default formats
+        // If no formats found, create default ones
+        if (formats.length === 0) {
             formats = [
                 {
                     quality: '1080p',
@@ -292,14 +285,14 @@ class YouTubeDownloader {
                     format: 'mp3',
                     bitrate: '128kbps',
                     size: '4MB',
-                    downloadUrl: `https://xdown-yt.vercel.app/api/download/${videoId}?quality=audio&format=mp3`
+                    downloadUrl: `https://xdown-yt.vercel.app/api/download/${videoId}?quality=audio`
                 }
             ];
         }
 
-        // Remove duplicates and sort by quality
+        // Remove duplicates and sort
         const uniqueFormats = Array.from(
-            new Map(formats.map(item => [item.quality, item])).values()
+            new Map(formats.map(item => [item.quality + item.format, item])).values()
         ).sort((a, b) => {
             if (a.quality === 'audio') return 1;
             if (b.quality === 'audio') return -1;
@@ -312,13 +305,13 @@ class YouTubeDownloader {
             status: "success",
             data: {
                 video: videoData,
-                formats: uniqueFormats
+                formats: uniqueFormats.slice(0, 10) // Limit to 10 formats
             }
         };
     }
 }
 
-// Inisialisasi downloader
+// Initialize downloader
 const downloader = new YouTubeDownloader();
 
 // Routes
@@ -328,25 +321,22 @@ app.get('/', (req, res) => {
         message: "YouTube Downloader API - DarkForge-X Edition",
         version: "2.0.0",
         endpoints: {
-            api_documentation: "GET /",
+            documentation: "GET /",
             download_info: "GET /api/ytdl?link=YOUTUBE_URL_OR_ID",
-            direct_download: "GET /api/download/:videoId?quality=QUALITY&format=FORMAT"
+            direct_download: "GET /api/download/:videoId?quality=QUALITY&itag=ITAG"
         },
-        usage_example: {
-            get_info: "https://xdown-yt.vercel.app/api/ytdl?link=https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        usage: {
+            example: "https://xdown-yt.vercel.app/api/ytdl?link=https://youtu.be/dQw4w9WgXcQ",
             parameters: {
                 link: "YouTube URL or Video ID (required)"
             }
         },
         features: [
-            "Multi-source video information extraction",
-            "Multiple quality formats",
-            "Audio extraction support",
-            "Advanced error handling",
-            "CORS enabled",
-            "Vercel serverless optimized"
-        ],
-        note: "This API is for educational purposes only. Please respect YouTube's Terms of Service."
+            "Multiple source fallback",
+            "Audio/video formats",
+            "File size estimation",
+            "CORS enabled"
+        ]
     });
 });
 
@@ -357,29 +347,29 @@ app.get('/api/ytdl', async (req, res) => {
         if (!link) {
             return res.status(400).json({
                 status: "error",
-                message: "Parameter 'link' is required",
-                example: "/api/ytdl?link=https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+                message: "Missing 'link' parameter",
+                example: "/api/ytdl?link=https://youtu.be/dQw4w9WgXcQ"
             });
         }
 
-        console.log(`Processing request for: ${link}`);
-        
+        // Extract video ID
         const videoId = await downloader.extractVideoId(link);
-        console.log(`Extracted Video ID: ${videoId}`);
         
+        // Get video info
         const videoInfo = await downloader.getVideoInfo(videoId);
         
         if (!videoInfo) {
             return res.status(404).json({
                 status: "error",
-                message: "Could not retrieve video information from any source",
+                message: "Video not found or cannot be accessed",
                 videoId: videoId
             });
         }
 
+        // Format response
         const response = await downloader.formatResponse(videoInfo, videoId);
         
-        // Cache control
+        // Cache for 1 hour
         res.setHeader('Cache-Control', 'public, max-age=3600');
         res.json(response);
 
@@ -387,8 +377,7 @@ app.get('/api/ytdl', async (req, res) => {
         console.error('API Error:', error);
         res.status(500).json({
             status: "error",
-            message: error.message,
-            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+            message: error.message
         });
     }
 });
@@ -396,70 +385,75 @@ app.get('/api/ytdl', async (req, res) => {
 app.get('/api/download/:videoId', async (req, res) => {
     try {
         const { videoId } = req.params;
-        const { quality, format } = req.query;
+        const { quality, itag, format } = req.query;
         
-        if (!videoId) {
+        if (!videoId || videoId.length !== 11) {
             return res.status(400).json({
                 status: "error",
-                message: "Video ID is required"
+                message: "Invalid video ID"
             });
         }
 
-        const videoInfo = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`);
+        // Get video info
+        const info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`);
         
-        let formatToDownload;
-        if (quality && format) {
-            formatToDownload = videoInfo.formats.find(f => 
-                (f.qualityLabel === quality || f.audioQuality) && 
-                f.container === format
-            );
+        let selectedFormat;
+        
+        if (itag) {
+            // Use specific itag if provided
+            selectedFormat = ytdl.chooseFormat(info.formats, { quality: parseInt(itag) });
         } else if (quality) {
-            formatToDownload = videoInfo.formats.find(f => 
-                f.qualityLabel === quality || f.audioQuality
-            );
+            // Filter by quality
+            const availableFormats = info.formats.filter(f => {
+                if (quality === 'audio') return f.hasAudio && !f.hasVideo;
+                if (quality === 'video') return f.hasVideo && !f.hasAudio;
+                return f.qualityLabel === quality;
+            });
+            
+            selectedFormat = availableFormats[0] || ytdl.chooseFormat(info.formats, { quality: 'highest' });
         } else {
-            // Default to highest quality video with audio
-            formatToDownload = ytdl.chooseFormat(videoInfo.formats, { 
+            // Default to highest quality with audio
+            selectedFormat = ytdl.chooseFormat(info.formats, { 
                 quality: 'highest',
-                filter: 'audioandvideo' 
+                filter: 'audioandvideo'
             });
         }
 
-        if (!formatToDownload) {
+        if (!selectedFormat) {
             return res.status(404).json({
                 status: "error",
                 message: "Requested format not available"
             });
         }
 
-        const mimeType = mime.lookup(formatToDownload.container || 'mp4') || 'video/mp4';
-        const filename = `${videoInfo.videoDetails.title.replace(/[^\w\s]/gi, '')}_${quality || 'download'}.${formatToDownload.container || 'mp4'}`;
+        // Set headers for download
+        const mimeType = mime.lookup(selectedFormat.container || 'mp4') || 'video/mp4';
+        const filename = `${info.videoDetails.title.replace(/[^\w\s-]/gi, '')}.${selectedFormat.container || 'mp4'}`;
         
         res.setHeader('Content-Type', mimeType);
-        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Content-Length', selectedFormat.contentLength || '');
         
+        // Stream the video
         ytdl(`https://www.youtube.com/watch?v=${videoId}`, {
-            format: formatToDownload,
-            quality: quality || 'highest'
+            format: selectedFormat
         }).pipe(res);
 
     } catch (error) {
         console.error('Download Error:', error);
         res.status(500).json({
             status: "error",
-            message: "Download failed",
-            error: error.message
+            message: "Download failed: " + error.message
         });
     }
 });
 
-// Error handling middleware
-app.use((err, req, res, next) => {
-    console.error('Global Error:', err);
-    res.status(500).json({
-        status: "error",
-        message: "Internal server error",
-        error: process.env.NODE_ENV === 'development' ? err.message : undefined
+// Health check endpoint
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'healthy',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime()
     });
 });
 
@@ -471,18 +465,21 @@ app.use((req, res) => {
         available_endpoints: [
             "GET /",
             "GET /api/ytdl?link=YOUTUBE_URL",
-            "GET /api/download/:videoId"
+            "GET /api/download/:videoId",
+            "GET /health"
         ]
     });
 });
 
-// Start server
+// Export for Vercel
+module.exports = app;
+
+// Start server if running locally
 if (require.main === module) {
-    app.listen(PORT, () => {
-        console.log(`🚀 YouTube Downloader API running on port ${PORT}`);
-        console.log(`📚 Documentation: http://localhost:${PORT}`);
-        console.log(`🔧 Mode: ${process.env.NODE_ENV || 'development'}`);
+    const port = process.env.PORT || 3000;
+    app.listen(port, () => {
+        console.log(`🚀 Server running on port ${port}`);
+        console.log(`📚 API: http://localhost:${port}`);
+        console.log(`🔄 Health: http://localhost:${port}/health`);
     });
 }
-
-module.exports = app;
