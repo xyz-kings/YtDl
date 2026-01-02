@@ -6,18 +6,18 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ===== USER AGENT (KUNCI NYA) =====
-const agent = ytdl.createAgent({
+// ===== USER AGENT =====
+const REQUEST_OPTIONS = {
   headers: {
     'User-Agent':
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
       '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept-Language': 'en-US,en;q=0.9'
   }
-});
+};
 
 // ===== HELPER =====
-async function extractVideoId(input) {
+function extractVideoId(input) {
   if (ytdl.validateID(input)) return input;
   if (ytdl.validateURL(input)) return ytdl.getURLVideoID(input);
   throw new Error('Invalid YouTube link');
@@ -30,7 +30,7 @@ function formatBytes(bytes) {
   return (bytes / Math.pow(1024, i)).toFixed(2) + ' ' + sizes[i];
 }
 
-// ===== ROUTE UTAMA =====
+// ===== MAIN API =====
 app.get('/api/xdown-yt', async (req, res) => {
   try {
     const { link } = req.query;
@@ -41,18 +41,21 @@ app.get('/api/xdown-yt', async (req, res) => {
       });
     }
 
-    const videoId = await extractVideoId(link);
+    const videoId = extractVideoId(link);
 
-    // PAKAI AGENT (WAJIB)
-    const info = await ytdl.getInfo(videoId, { agent });
+    // 🔥 PALING AMAN DI VERCEL
+    const info = await ytdl.getInfo(videoId, {
+      requestOptions: REQUEST_OPTIONS
+    });
+
     const v = info.videoDetails;
-
-    const formatsRaw = info.formats.filter(f => f.hasAudio);
 
     const formats = [];
     const seen = new Set();
 
-    for (const f of formatsRaw) {
+    for (const f of info.formats) {
+      if (!f.hasAudio) continue;
+
       const quality = f.qualityLabel || 'audio';
       const format = f.container || 'mp4';
       const key = `${quality}-${format}`;
@@ -105,39 +108,7 @@ app.get('/api/xdown-yt', async (req, res) => {
   }
 });
 
-// ===== OPTIONAL DOWNLOAD (RAWAN TIMEOUT DI VERCEL) =====
-app.get('/api/download/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { itag } = req.query;
-
-    const info = await ytdl.getInfo(id, { agent });
-    const format = ytdl.chooseFormat(info.formats, {
-      quality: itag || 'highest'
-    });
-
-    if (!format) {
-      return res.status(404).json({
-        status: 'error',
-        message: 'Format not found'
-      });
-    }
-
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${info.videoDetails.title.replace(/[^\w\s]/gi, '')}.${format.container || 'mp4'}"`
-    );
-
-    ytdl(id, { format, agent }).pipe(res);
-  } catch (e) {
-    res.status(500).json({
-      status: 'error',
-      message: e.message
-    });
-  }
-});
-
-// ===== EXPORT VERCEL =====
+// ===== EXPORT FOR VERCEL =====
 module.exports = (req, res) => {
   app(req, res);
 };
