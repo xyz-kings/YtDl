@@ -6,16 +6,20 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ===== USER AGENT (KUNCI NYA) =====
+const agent = ytdl.createAgent({
+  headers: {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+      '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept-Language': 'en-US,en;q=0.9'
+  }
+});
+
 // ===== HELPER =====
 async function extractVideoId(input) {
-  // langsung ID
   if (ytdl.validateID(input)) return input;
-
-  // semua URL YouTube (shorts, embed, youtu.be, mobile, ada ?si dll)
-  if (ytdl.validateURL(input)) {
-    return ytdl.getURLVideoID(input);
-  }
-
+  if (ytdl.validateURL(input)) return ytdl.getURLVideoID(input);
   throw new Error('Invalid YouTube link');
 }
 
@@ -26,7 +30,7 @@ function formatBytes(bytes) {
   return (bytes / Math.pow(1024, i)).toFixed(2) + ' ' + sizes[i];
 }
 
-// ===== ROUTE =====
+// ===== ROUTE UTAMA =====
 app.get('/api/xdown-yt', async (req, res) => {
   try {
     const { link } = req.query;
@@ -39,37 +43,36 @@ app.get('/api/xdown-yt', async (req, res) => {
 
     const videoId = await extractVideoId(link);
 
-    // AMAN: jangan pakai full URL
-    const info = await ytdl.getInfo(videoId);
+    // PAKAI AGENT (WAJIB)
+    const info = await ytdl.getInfo(videoId, { agent });
     const v = info.videoDetails;
 
-    // FORMAT
-    const formats = info.formats
-      .filter(f => f.hasAudio)
-      .map(f => ({
-        quality: f.qualityLabel || 'audio',
-        format: f.container || (f.mimeType?.includes('audio') ? 'mp3' : 'mp4'),
+    const formatsRaw = info.formats.filter(f => f.hasAudio);
+
+    const formats = [];
+    const seen = new Set();
+
+    for (const f of formatsRaw) {
+      const quality = f.qualityLabel || 'audio';
+      const format = f.container || 'mp4';
+      const key = `${quality}-${format}`;
+
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      formats.push({
+        quality,
+        format,
         fps: f.fps || null,
         bitrate: f.audioBitrate ? `${f.audioBitrate}kbps` : undefined,
         size: f.contentLength
           ? formatBytes(Number(f.contentLength))
           : 'Unknown',
         downloadUrl: `/api/download/${videoId}?itag=${f.itag}`
-      }));
-
-    // bersihin duplikat + rapihin
-    const uniq = [];
-    const map = new Set();
-
-    for (const f of formats) {
-      const key = `${f.quality}-${f.format}`;
-      if (!map.has(key)) {
-        map.add(key);
-        uniq.push(f);
-      }
+      });
     }
 
-    uniq.sort((a, b) => {
+    formats.sort((a, b) => {
       if (a.quality === 'audio') return 1;
       if (b.quality === 'audio') return -1;
       return parseInt(b.quality) - parseInt(a.quality);
@@ -90,7 +93,7 @@ app.get('/api/xdown-yt', async (req, res) => {
             channelId: v.author.id,
             profileUrl: v.author.channel_url
           },
-          formats: uniq.slice(0, 10)
+          formats: formats.slice(0, 10)
         }
       }
     });
@@ -102,19 +105,22 @@ app.get('/api/xdown-yt', async (req, res) => {
   }
 });
 
-// ===== OPTIONAL DOWNLOAD (HATI2 TIMEOUT) =====
+// ===== OPTIONAL DOWNLOAD (RAWAN TIMEOUT DI VERCEL) =====
 app.get('/api/download/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { itag } = req.query;
 
-    const info = await ytdl.getInfo(id);
+    const info = await ytdl.getInfo(id, { agent });
     const format = ytdl.chooseFormat(info.formats, {
       quality: itag || 'highest'
     });
 
     if (!format) {
-      return res.status(404).json({ status: 'error', message: 'Format not found' });
+      return res.status(404).json({
+        status: 'error',
+        message: 'Format not found'
+      });
     }
 
     res.setHeader(
@@ -122,9 +128,12 @@ app.get('/api/download/:id', async (req, res) => {
       `attachment; filename="${info.videoDetails.title.replace(/[^\w\s]/gi, '')}.${format.container || 'mp4'}"`
     );
 
-    ytdl(id, { format }).pipe(res);
+    ytdl(id, { format, agent }).pipe(res);
   } catch (e) {
-    res.status(500).json({ status: 'error', message: e.message });
+    res.status(500).json({
+      status: 'error',
+      message: e.message
+    });
   }
 });
 
