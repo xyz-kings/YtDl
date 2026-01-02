@@ -1,85 +1,33 @@
 const express = require('express');
-const axios = require('axios');
 const cors = require('cors');
 const ytdl = require('ytdl-core');
-const mime = require('mime-types');
 
 const app = express();
-
-// ===== MIDDLEWARE =====
 app.use(cors());
 app.use(express.json());
 
-// ===== UTIL CLASS =====
-class YouTubeDownloader {
-  async extractVideoId(input) {
-    const regex =
-      /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/)?([a-zA-Z0-9_-]{11})/;
-    const match = input.match(regex);
-    if (!match) throw new Error('Invalid YouTube URL or ID');
-    return match[1];
+// ===== HELPER =====
+async function extractVideoId(input) {
+  // langsung ID
+  if (ytdl.validateID(input)) return input;
+
+  // semua URL YouTube (shorts, embed, youtu.be, mobile, ada ?si dll)
+  if (ytdl.validateURL(input)) {
+    return ytdl.getURLVideoID(input);
   }
 
-  async getVideoInfo(videoId) {
-    return await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`);
-  }
-
-  formatBytes(bytes) {
-    if (!bytes) return 'Unknown';
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(1024));
-    return (bytes / Math.pow(1024, i)).toFixed(2) + ' ' + sizes[i];
-  }
-
-  formatResponse(info) {
-    const video = info.videoDetails;
-
-    const formats = info.formats
-      .filter(f => f.hasAudio)
-      .map(f => ({
-        itag: f.itag,
-        quality: f.qualityLabel || 'audio',
-        format: f.container || 'mp4',
-        fps: f.fps || null,
-        bitrate: f.audioBitrate ? `${f.audioBitrate}kbps` : null,
-        size: f.contentLength
-          ? this.formatBytes(Number(f.contentLength))
-          : 'Unknown',
-        downloadUrl: `/api/download/${video.videoId}?itag=${f.itag}`
-      }))
-      .slice(0, 10);
-
-    return {
-      status: 'success',
-      data: {
-        video: {
-          id: video.videoId,
-          title: video.title,
-          duration: Number(video.lengthSeconds),
-          thumbnail: video.thumbnails.at(-1)?.url,
-          author: {
-            name: video.author.name,
-            channelUrl: video.author.channel_url
-          }
-        },
-        formats
-      }
-    };
-  }
+  throw new Error('Invalid YouTube link');
 }
 
-const downloader = new YouTubeDownloader();
+function formatBytes(bytes) {
+  if (!bytes) return 'Unknown';
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return (bytes / Math.pow(1024, i)).toFixed(2) + ' ' + sizes[i];
+}
 
-// ===== ROUTES =====
-app.get('/', (req, res) => {
-  res.json({
-    status: 'online',
-    name: 'YT Downloader API',
-    endpoint: '/api/ytdl?link=YOUTUBE_URL'
-  });
-});
-
-app.get('/api/ytdl', async (req, res) => {
+// ===== ROUTE =====
+app.get('/api/xdown-yt', async (req, res) => {
   try {
     const { link } = req.query;
     if (!link) {
@@ -89,12 +37,63 @@ app.get('/api/ytdl', async (req, res) => {
       });
     }
 
-    const videoId = await downloader.extractVideoId(link);
-    const info = await downloader.getVideoInfo(videoId);
-    const result = downloader.formatResponse(info);
+    const videoId = await extractVideoId(link);
 
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.json(result);
+    // AMAN: jangan pakai full URL
+    const info = await ytdl.getInfo(videoId);
+    const v = info.videoDetails;
+
+    // FORMAT
+    const formats = info.formats
+      .filter(f => f.hasAudio)
+      .map(f => ({
+        quality: f.qualityLabel || 'audio',
+        format: f.container || (f.mimeType?.includes('audio') ? 'mp3' : 'mp4'),
+        fps: f.fps || null,
+        bitrate: f.audioBitrate ? `${f.audioBitrate}kbps` : undefined,
+        size: f.contentLength
+          ? formatBytes(Number(f.contentLength))
+          : 'Unknown',
+        downloadUrl: `/api/download/${videoId}?itag=${f.itag}`
+      }));
+
+    // bersihin duplikat + rapihin
+    const uniq = [];
+    const map = new Set();
+
+    for (const f of formats) {
+      const key = `${f.quality}-${f.format}`;
+      if (!map.has(key)) {
+        map.add(key);
+        uniq.push(f);
+      }
+    }
+
+    uniq.sort((a, b) => {
+      if (a.quality === 'audio') return 1;
+      if (b.quality === 'audio') return -1;
+      return parseInt(b.quality) - parseInt(a.quality);
+    });
+
+    res.json({
+      status: 'success',
+      data: {
+        video: {
+          id: v.videoId,
+          title: v.title,
+          description: v.shortDescription || '',
+          duration: Number(v.lengthSeconds),
+          uploadDate: v.uploadDate || null,
+          thumbnail: `https://i.ytimg.com/vi/${v.videoId}/maxresdefault.jpg`,
+          author: {
+            name: v.author.name,
+            channelId: v.author.id,
+            profileUrl: v.author.channel_url
+          },
+          formats: uniq.slice(0, 10)
+        }
+      }
+    });
   } catch (err) {
     res.status(500).json({
       status: 'error',
@@ -103,62 +102,33 @@ app.get('/api/ytdl', async (req, res) => {
   }
 });
 
-app.get('/api/download/:videoId', async (req, res) => {
+// ===== OPTIONAL DOWNLOAD (HATI2 TIMEOUT) =====
+app.get('/api/download/:id', async (req, res) => {
   try {
-    const { videoId } = req.params;
+    const { id } = req.params;
     const { itag } = req.query;
 
-    if (!videoId || videoId.length !== 11) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Invalid video ID'
-      });
-    }
-
-    const info = await ytdl.getInfo(videoId);
-    const format = itag
-      ? ytdl.chooseFormat(info.formats, { quality: itag })
-      : ytdl.chooseFormat(info.formats, { quality: 'highest' });
+    const info = await ytdl.getInfo(id);
+    const format = ytdl.chooseFormat(info.formats, {
+      quality: itag || 'highest'
+    });
 
     if (!format) {
-      return res.status(404).json({
-        status: 'error',
-        message: 'Format not found'
-      });
+      return res.status(404).json({ status: 'error', message: 'Format not found' });
     }
 
-    const ext = format.container || 'mp4';
-    const mimeType = mime.lookup(ext) || 'video/mp4';
-    const filename = `${info.videoDetails.title.replace(/[^\w\s]/gi, '')}.${ext}`;
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${info.videoDetails.title.replace(/[^\w\s]/gi, '')}.${format.container || 'mp4'}"`
+    );
 
-    res.setHeader('Content-Type', mimeType);
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-
-    ytdl(videoId, { format }).pipe(res);
-  } catch (err) {
-    res.status(500).json({
-      status: 'error',
-      message: err.message
-    });
+    ytdl(id, { format }).pipe(res);
+  } catch (e) {
+    res.status(500).json({ status: 'error', message: e.message });
   }
 });
 
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    uptime: process.uptime()
-  });
-});
-
-// ===== 404 =====
-app.use((req, res) => {
-  res.status(404).json({
-    status: 'error',
-    message: 'Endpoint not found'
-  });
-});
-
-// ===== EXPORT FOR VERCEL (INI KUNCI NYA) =====
+// ===== EXPORT VERCEL =====
 module.exports = (req, res) => {
   app(req, res);
 };
